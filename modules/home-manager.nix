@@ -17,7 +17,7 @@ let
     in
     pkgs.fetchurl {
       name = "${id}.crx";
-      url = "https://clients2.google.com/service/update2/crx?response=redirect&os=${os}&arch=${arch}&os_arch=${os_arch}&nacl_arch=x86-64&prod=chromiumcrx&prodchannel=stable&prodversion=120.0.0.0&acceptformat=crx3&x=id%3D${id}%26installsource%3Dondemand%26uc";
+      url = "https://clients2.google.com/service/update2/crx?response=redirect&os=${os}&arch=${arch}&os_arch=${os_arch}&nacl_arch=x86-64&prod=chromiumcrx&prodchannel=stable&prodversion=${cfg.prodversion}&acceptformat=crx3&x=id%3D${id}%26installsource%3Dondemand%26uc";
       inherit hash;
     };
 
@@ -29,6 +29,18 @@ let
         src = fetchExtension { inherit id hash; };
       }
       ''
+        # The Web Store answers 204 No Content for extensions that need a newer
+        # browser than `prodversion` claims. fetchurl stores that empty body
+        # happily, so without this check the build succeeds and the extension is
+        # silently missing at runtime.
+        if [ ! -s "$src" ]; then
+          echo "error: the CRX for ${id} is empty." >&2
+          echo "The Chrome Web Store returned no content, which usually means" >&2
+          echo "programs.helium.prodversion (${cfg.prodversion}) is older than the" >&2
+          echo "extension supports. Raise it and re-run the hash prefetch." >&2
+          exit 1
+        fi
+
         mkdir -p $out
         unzip -q $src -d $out || true
 
@@ -92,6 +104,18 @@ in
         }
       );
       default = [ ];
+    };
+    prodversion = lib.mkOption {
+      type = lib.types.str;
+      default = "151.0.0.0";
+      description = ''
+        Chrome version advertised to the Web Store when downloading extensions.
+
+        The store replies 204 No Content for any extension that requires a newer
+        browser than this, and an empty body still hashes fine, so too low a
+        value yields extensions that build but are empty. Keep it at or above
+        the Chromium version Helium is based on.
+      '';
     };
     extraFlags = lib.mkOption {
       type = lib.types.listOf lib.types.str;
