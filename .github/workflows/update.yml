@@ -1,0 +1,114 @@
+name: update-helium
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-helium
+  cancel-in-progress: false
+
+jobs:
+  update-helium:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Bump sources.nix to the latest upstream release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          SOURCES_FILE="modules/sources.nix"
+
+          # Anchor on the leading whitespace and the opening quote so this only
+          # matches the `versions` block and never the `x86_64-linux = versions:`
+          # attribute names further down the file.
+          get_current_version() {
+            grep -E "^[[:space:]]+$1 = \"" "$SOURCES_FILE" | head -1 | sed 's/.*= "\(.*\)";/\1/'
+          }
+
+          get_latest_release() {
+            curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+              "https://api.github.com/repos/$1/releases/latest" | jq -r .tag_name
+          }
+
+          # prefetch-file reports an SRI hash directly, so there is no separate
+          # `nix hash convert` step that could drift out of sync.
+          fetch_sri_hash() {
+            nix store prefetch-file --json "$1" | jq -r .hash
+          }
+
+          update_version() {
+            sed -i "s|$1 = \"$2\";|$1 = \"$3\";|" "$SOURCES_FILE"
+          }
+
+          # Every hash sits on the line directly below the url it belongs to.
+          update_hash() {
+            sed -i "/$1/{n; s|hash = \"[^\"]*\";|hash = \"$2\";|}" "$SOURCES_FILE"
+          }
+
+          echo "--- Linux ---"
+          CURRENT_LINUX=$(get_current_version linux)
+          LATEST_LINUX=$(get_latest_release imputnet/helium-linux)
+
+          if [ "$LATEST_LINUX" != "$CURRENT_LINUX" ]; then
+            echo "$CURRENT_LINUX -> $LATEST_LINUX"
+            BASE="https://github.com/imputnet/helium-linux/releases/download/$LATEST_LINUX"
+            X86_HASH=$(fetch_sri_hash "$BASE/helium-$LATEST_LINUX-x86_64_linux.tar.xz")
+            ARM_HASH=$(fetch_sri_hash "$BASE/helium-$LATEST_LINUX-arm64_linux.tar.xz")
+            update_version linux "$CURRENT_LINUX" "$LATEST_LINUX"
+            update_hash "x86_64_linux\.tar\.xz" "$X86_HASH"
+            update_hash "arm64_linux\.tar\.xz" "$ARM_HASH"
+          else
+            echo "already at $LATEST_LINUX"
+          fi
+
+          echo "--- macOS ---"
+          CURRENT_DARWIN=$(get_current_version darwin)
+          LATEST_DARWIN=$(get_latest_release imputnet/helium-macos)
+
+          if [ "$LATEST_DARWIN" != "$CURRENT_DARWIN" ]; then
+            echo "$CURRENT_DARWIN -> $LATEST_DARWIN"
+            BASE="https://github.com/imputnet/helium-macos/releases/download/$LATEST_DARWIN"
+            X86_HASH=$(fetch_sri_hash "$BASE/helium_${LATEST_DARWIN}_x86_64-macos.dmg")
+            ARM_HASH=$(fetch_sri_hash "$BASE/helium_${LATEST_DARWIN}_arm64-macos.dmg")
+            update_version darwin "$CURRENT_DARWIN" "$LATEST_DARWIN"
+            update_hash "x86_64-macos\.dmg" "$X86_HASH"
+            update_hash "arm64-macos\.dmg" "$ARM_HASH"
+          else
+            echo "already at $LATEST_DARWIN"
+          fi
+
+          echo "HELIUM_LINUX=$(get_current_version linux)" >> "$GITHUB_ENV"
+          echo "HELIUM_DARWIN=$(get_current_version darwin)" >> "$GITHUB_ENV"
+
+      # A bad hash or a reshuffled upstream tarball should fail here rather than
+      # land on main and break everyone who tracks this flake.
+      - name: Verify the flake still builds
+        run: nix build --no-link --print-build-logs .#helium
+
+      - name: Commit and push
+        run: |
+          set -euo pipefail
+
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add modules/sources.nix
+          git commit -m "chore: update helium (linux: $HELIUM_LINUX, darwin: $HELIUM_DARWIN)"
+          git push
