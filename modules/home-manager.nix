@@ -48,13 +48,22 @@ let
         rm -rf $out/_metadata
       '';
 
-  resolvedExtensions = map (spec: {
-    inherit (spec) id;
-    unpacked = unpackExtension { inherit (spec) id hash; };
-  }) cfg.extensions;
+  unpackedMode = cfg.extensionInstallMode == "unpacked";
+
+  resolvedExtensions = lib.optionals unpackedMode (
+    map (spec: {
+      inherit (spec) id;
+      unpacked = unpackExtension { inherit (spec) id hash; };
+    }) cfg.extensions
+  );
+
+  webStoreUpdateUrl = "https://clients2.google.com/service/update2/crx";
 
   policyAttrs = {
     ExtensionInstallAllowlist = map (ext: ext.id) cfg.extensions;
+  }
+  // lib.optionalAttrs (!unpackedMode && cfg.extensions != [ ]) {
+    ExtensionInstallForcelist = map (ext: "${ext.id};${webStoreUpdateUrl}") cfg.extensions;
   }
   // cfg.extraPolicies;
 
@@ -103,11 +112,41 @@ in
         lib.types.submodule {
           options = {
             id = lib.mkOption { type = lib.types.str; };
-            hash = lib.mkOption { type = lib.types.str; };
+            hash = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              description = ''
+                CRX hash, only needed when extensionInstallMode is "unpacked".
+              '';
+            };
           };
         }
       );
       default = [ ];
+    };
+    extensionInstallMode = lib.mkOption {
+      type = lib.types.enum [
+        "policy"
+        "unpacked"
+      ];
+      default = "policy";
+      description = ''
+        How `extensions` reach the browser.
+
+        "policy" force-installs them through the ExtensionInstallForcelist
+        Chromium policy. The browser downloads each extension itself, so the
+        Web Store IDs and signatures are preserved (native messaging hosts
+        such as KeePassXC depend on the real ID), the install is recorded in
+        the profile, and extensions keep updating themselves. Requires the
+        NixOS module so the policy file lands in /etc/chromium/policies.
+
+        "unpacked" pins the CRXs in the Nix store and passes them via
+        --load-extension. It is reproducible and works without the NixOS
+        module, but Chromium treats command-line extensions as freshly
+        installed on every start, which re-fires each extension's onInstalled
+        handler (welcome tabs on every launch), and derives IDs from the load
+        path unless the manifest carries a "key".
+      '';
     };
     prodversion = lib.mkOption {
       type = lib.types.str;
@@ -157,6 +196,14 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    assertions = map (ext: {
+      assertion = ext.hash != null;
+      message = ''
+        programs.helium.extensions."${ext.id}".hash is required when
+        programs.helium.extensionInstallMode = "unpacked".
+      '';
+    }) (lib.optionals unpackedMode cfg.extensions);
+
     home = {
       packages = [
         heliumWithFlags
@@ -165,18 +212,20 @@ in
       ];
 
       activation = {
-        # Refresh the writable copies the --load-extension flag points at. The
-        # tree is rebuilt from scratch so extensions that were removed from the
-        # config, or whose store path changed, do not linger.
-        heliumExtensions = lib.mkIf (resolvedExtensions != [ ]) (
-          lib.hm.dag.entryAfter [ "writeBoundary" ] ''
-            run rm -rf ${lib.escapeShellArg extensionRoot}
-            run mkdir -p ${lib.escapeShellArg extensionRoot}
-            ${lib.concatMapStringsSep "\n" (ext: ''
-              run cp -r ${ext.unpacked} ${lib.escapeShellArg "${extensionRoot}/${ext.id}"}
-            '') resolvedExtensions}
-            run chmod -R u+w ${lib.escapeShellArg extensionRoot}
-          ''
+        heliumExtensions = lib.hm.dag.entryAfter [ "writeBoundary" ] (
+          if resolvedExtensions != [ ] then
+            ''
+              run rm -rf ${lib.escapeShellArg extensionRoot}
+              run mkdir -p ${lib.escapeShellArg extensionRoot}
+              ${lib.concatMapStringsSep "\n" (ext: ''
+                run cp -r ${ext.unpacked} ${lib.escapeShellArg "${extensionRoot}/${ext.id}"}
+              '') resolvedExtensions}
+              run chmod -R u+w ${lib.escapeShellArg extensionRoot}
+            ''
+          else
+            ''
+              run rm -rf ${lib.escapeShellArg extensionRoot}
+            ''
         );
 
         heliumPreferences = lib.mkIf (cfg.preferences != { }) (

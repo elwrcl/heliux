@@ -81,11 +81,8 @@ Then configure it:
       package = helium.packages.${pkgs.system}.helium-widevine;
 
       extensions = [
-        # uBlock Origin — see "Obtaining extensions" below
-        {
-          id = "cjpalhdlnbpafiamejdnhcphjbkeiagm";
-          hash = "sha256-FIbmYVj8cmXce7Vq4h7d2nOjmk4RkCnABmC4y5NDyGk=";
-        }
+        # uBlock Origin
+        { id = "cjpalhdlnbpafiamejdnhcphjbkeiagm"; }
       ];
 
       # Added to the wrapper
@@ -118,7 +115,8 @@ The following options are available under `programs.helium`:
 | :--------------- | :----------------- | :--------------------- | :------------------------------------------------- |
 | `enable`         | boolean            | `false`                | Whether to enable the Helium browser module.       |
 | `package`        | package            | `self.packages.helium` | The helium package to use.                         |
-| `extensions`     | list of submodules | `[]`                   | List of extensions to install `{ id, hash }`.      |
+| `extensions`     | list of submodules | `[]`                   | Extensions to install: `{ id, hash }` (`hash` only needed in `unpacked` mode). |
+| `extensionInstallMode` | `"policy"` or `"unpacked"` | `"policy"` | How extensions are installed — see below.  |
 | `extraFlags`     | list of strings    | `[]`                   | Command line arguments passed to the wrapper.      |
 | `extraPolicies`  | attribute set      | `{}`                   | Raw Chromium policies to apply.                    |
 | `preferences`    | attribute set      | `{}`                   | Json that will be merged into XDG Config.          |
@@ -157,7 +155,32 @@ find all the json keys and values inside the helium browser by typing
 }
 ```
 
+## Extension install modes
+
+`extensionInstallMode = "policy"` (the default) force-installs every entry in
+`extensions` through the `ExtensionInstallForcelist` Chromium policy. The
+browser downloads and installs each extension itself, so:
+
+- the real Web Store ID and signature are kept — native messaging hosts such as
+  KeePassXC-Browser match on that ID and only work this way,
+- the install is recorded in the profile, so each extension's `onInstalled`
+  handler runs once instead of on every launch,
+- extensions keep updating themselves.
+
+This mode needs the NixOS module, which is what writes the policy file into
+`/etc/chromium/policies/managed/`. No `hash` is required.
+
+`extensionInstallMode = "unpacked"` pins the CRXs in the Nix store and hands
+them to the browser with `--load-extension`. It is fully reproducible and needs
+no NixOS module, but Chromium treats command-line extensions as freshly
+installed on every start — every extension re-runs its `onInstalled` handler,
+which for many extensions means a welcome tab on each launch — and it derives
+the extension ID from the load path unless the manifest carries a `key`. Each
+entry needs a `hash` in this mode; see below.
+
 ## Obtaining extensions
+
+Only needed for `extensionInstallMode = "unpacked"`.
 
 > [!WARNING]
 > Be wary that if you are rate-limited that the file will be empty and the build will fail
