@@ -57,7 +57,11 @@ let
     }) cfg.extensions
   );
 
-  webStoreUpdateUrl = "https://clients2.google.com/service/update2/crx";
+  # Helium's update requests carry no prodversion, and the Web Store answers
+  # every one of them with <updatecheck status="noupdate"/> — force-installs
+  # then silently do nothing. Pinning it in the update URL survives into the
+  # request Chromium builds, since it only appends its own query parameters.
+  webStoreUpdateUrl = "https://clients2.google.com/service/update2/crx?prodversion=${cfg.prodversion}";
 
   policyAttrs = {
     ExtensionInstallAllowlist = map (ext: ext.id) cfg.extensions;
