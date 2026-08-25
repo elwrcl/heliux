@@ -53,15 +53,19 @@ let
     unpacked = unpackExtension { inherit (spec) id hash; };
   }) cfg.extensions;
 
-  # We add the IDs to the Allowlist policy so Helium doesn't disable them for being "unverified"
   policyAttrs = {
     ExtensionInstallAllowlist = map (ext: ext.id) cfg.extensions;
   }
   // cfg.extraPolicies;
 
+  extensionRoot = "${config.xdg.dataHome}/helium/extensions";
   loadExtensionFlag =
     if resolvedExtensions != [ ] then
-      [ "--load-extension=${lib.concatStringsSep "," (map (ext: "${ext.unpacked}") resolvedExtensions)}" ]
+      [
+        "--load-extension=${
+          lib.concatMapStringsSep "," (ext: "${extensionRoot}/${ext.id}") resolvedExtensions
+        }"
+      ]
     else
       [ ];
 
@@ -160,8 +164,23 @@ in
         pkgs.coreutils
       ];
 
-      activation = lib.mkIf (cfg.preferences != { }) {
-        heliumPreferences = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+      activation = {
+        # Refresh the writable copies the --load-extension flag points at. The
+        # tree is rebuilt from scratch so extensions that were removed from the
+        # config, or whose store path changed, do not linger.
+        heliumExtensions = lib.mkIf (resolvedExtensions != [ ]) (
+          lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+            run rm -rf ${lib.escapeShellArg extensionRoot}
+            run mkdir -p ${lib.escapeShellArg extensionRoot}
+            ${lib.concatMapStringsSep "\n" (ext: ''
+              run cp -r ${ext.unpacked} ${lib.escapeShellArg "${extensionRoot}/${ext.id}"}
+            '') resolvedExtensions}
+            run chmod -R u+w ${lib.escapeShellArg extensionRoot}
+          ''
+        );
+
+        heliumPreferences = lib.mkIf (cfg.preferences != { }) (
+          lib.hm.dag.entryAfter [ "writeBoundary" ] ''
           prefs_dir="$HOME/.config/net.imput.helium/Default"
           prefs_file="$prefs_dir/Preferences"
           nix_prefs='${builtins.toJSON cfg.preferences}'
@@ -176,7 +195,8 @@ in
           else
             printf '%s\n' "$nix_prefs" > "$prefs_file"
           fi
-        '';
+        ''
+        );
       };
     };
 
