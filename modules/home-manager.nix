@@ -100,6 +100,14 @@ let
     ExtensionInstallForcelist = map (ext: "${ext.id};${webStoreUpdateUrl}") cfg.extensions;
   }
   // cfg.extraPolicies;
+  userDataDir = "${config.xdg.configHome}/net.imput.helium";
+  widevineCdm =
+    let
+      subdir = cfg.package.widevineCdmSubdir or null;
+    in
+    if subdir == null then null else "${cfg.package}/${subdir}";
+
+  widevineHintFile = "${userDataDir}/WidevineCdm/latest-component-updated-widevine-cdm";
 
   extensionRoot = "${config.xdg.dataHome}/helium/extensions";
   loadExtensionFlag =
@@ -317,9 +325,25 @@ in
             ''
         );
 
+        heliumWidevine = lib.hm.dag.entryAfter [ "writeBoundary" ] (
+          if widevineCdm != null then
+            ''
+              run ${lib.getExe' pkgs.coreutils "install"} -Dm644 \
+                ${pkgs.writeText "helium-widevine-cdm-hint" (builtins.toJSON { Path = widevineCdm; })} \
+                ${lib.escapeShellArg widevineHintFile}
+            ''
+          else
+            ''
+              if [ -f ${lib.escapeShellArg widevineHintFile} ] \
+                 && grep -q '"/nix/store/' ${lib.escapeShellArg widevineHintFile}; then
+                run rm -f ${lib.escapeShellArg widevineHintFile}
+              fi
+            ''
+        );
+
         heliumPreferences = lib.mkIf (cfg.preferences != { }) (
           lib.hm.dag.entryAfter [ "writeBoundary" ] ''
-            prefs_file="$HOME/.config/net.imput.helium/Default/Preferences"
+            prefs_file=${lib.escapeShellArg "${userDataDir}/Default/Preferences"}
             nix_prefs=${lib.escapeShellArg (builtins.toJSON cfg.preferences)}
             merged_prefs="$(mktemp)"
 

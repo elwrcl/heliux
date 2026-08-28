@@ -25,19 +25,40 @@ nix run github:elwrcl/heliux
 
 ## DRM / Widevine
 
-Helium is compiled with ***Widevine*** support, but upstream ships no CDM library and
-the wrapper passes `--disable-component-update`, so the component updater can
+Helium is compiled with ***Widevine*** support but upstream ships no CDM library,
+and the wrapper passes `--disable-component-update`, so the component updater can
 never fetch one at runtime. The result is that DRM playback silently fails.
 
-The `helium-widevine` package bundles the CDM next to the binary, which fixes
-playback without re-enabling the update machinery:
+Supplying the CDM takes two steps, and the second one is easy to miss. Helium is
+built with `enable_widevine` but *without* `bundle_widevine_cdm`, so it never
+looks beside its own binary for a CDM — dropping the library into the package is
+not enough by itself. The only location it consults at startup is the hint file
+the component updater would normally leave in the user data dir:
+
+```
+~/.config/net.imput.helium/WidevineCdm/latest-component-updated-widevine-cdm
+```
+
+So `helium-widevine` pins the CDM in the store, and the home-manager module
+writes that hint file pointing at it. The update machinery stays off — the hint
+file is read directly at startup and does not depend on the updater:
 
 ```nix
 programs.helium.package = helium.packages.${system}.helium-widevine;
 ```
 
+Switching the package back to plain `helium` removes the hint file again, but
+only when it points into the Nix store; a hint left by a real component update
+is not touched.
+
 The CDM is proprietary, so this output requires `allowUnfree`. Plain `helium` is
 unchanged and stays free-software only.
+
+> [!NOTE]
+> The hint file is written by the home-manager module, so `helium-widevine` on
+> its own — installed with `nix profile` or `environment.systemPackages` — still
+> will not play DRM. Check with `helium://components`, or from the console:
+> `navigator.requestMediaKeySystemAccess('com.widevine.alpha', [{initDataTypes:['cenc'],videoCapabilities:[{contentType:'video/mp4; codecs="avc1.42E01E"'}]}])`
 
 ## NixOS + home-manager
 

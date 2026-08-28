@@ -220,7 +220,11 @@ stdenv.mkDerivation {
     })
   ];
 
-  passthru = { inherit enabledFeatures; };
+  passthru = {
+    inherit enabledFeatures;
+    widevineCdmSubdir = if enableWidevine then "opt/helium/WidevineCdm" else null;
+  };
+
   meta = {
     description = "Private, fast, and honest web browser based on ungoogled-chromium";
     homepage = "https://helium.computer/";
