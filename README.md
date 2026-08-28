@@ -117,10 +117,32 @@ The following options are available under `programs.helium`:
 | `package`        | package            | `self.packages.helium` | The helium package to use.                         |
 | `extensions`     | list of submodules | `[]`                   | Extensions to install: `{ id, hash }` (`hash` only needed in `unpacked` mode). |
 | `extensionInstallMode` | `"policy"` or `"unpacked"` | `"policy"` | How extensions are installed — see below.  |
-| `extraFlags`     | list of strings    | `[]`                   | Command line arguments passed to the wrapper.      |
+| `extraFlags`     | list of strings    | `[]`                   | Command line arguments passed to the wrapper. Do not pass `--enable-features` here — use `extraFeatures`. |
+| `extraFeatures`  | list of strings    | `[]`                   | Chromium features merged into the single `--enable-features` switch. |
+| `allowFileAccessFromFiles` | boolean  | `false`                | Pass `--allow-file-access-from-files`. Lets any local `file://` page read other files on disk — see below. |
 | `extraPolicies`  | attribute set      | `{}`                   | Raw Chromium policies to apply.                    |
 | `preferences`    | attribute set      | `{}`                   | Json that will be merged into XDG Config.          |
 | `defaultBrowser` | boolean            | `false`                | Set Helium as the default browser in XDG mimeapps. |
+
+## Flags and features
+
+Chromium stores one value per command line switch, so a second
+`--enable-features=…` silently *replaces* the first instead of adding to it.
+Both the package and the home-manager wrapper need to enable features, so they
+build a single combined switch: the package exposes its list as
+`passthru.enabledFeatures`, and the module merges its own additions and your
+`extraFeatures` into it.
+
+That is why features go in `extraFeatures` rather than `extraFlags` — a raw
+`--enable-features` in `extraFlags` would come last and wipe out everything
+else.
+
+> [!WARNING]
+> `allowFileAccessFromFiles` drops the same-origin restriction for `file://`
+> pages. Any local HTML file you open — including one you just downloaded — can
+> then read other files on your disk and send them anywhere. It is off by
+> default; only turn it on if you specifically need local pages to load local
+> resources.
 
 ## Policies
 
@@ -139,6 +161,14 @@ Common useful policies:
 These are usually what you imperatively choose in the `Settings` menu. You can
 find all the json keys and values inside the helium browser by typing
 `helium://prefs-internals/` and searching for the values.
+
+> [!IMPORTANT]
+> The merge happens once, at activation time. Chromium owns this file while it
+> runs and rewrites it from memory on exit, so close the browser before you
+> activate or your settings get written back over. Preferences that Chromium
+> protects with a MAC in `Secure Preferences` cannot be set this way at all — it
+> spots the outside edit and resets them. Use `extraPolicies` for anything that
+> has to stick.
 
 ```nix
 {
@@ -182,10 +212,23 @@ entry needs a `hash` in this mode; see below.
 
 Only needed for `extensionInstallMode = "unpacked"`.
 
-> [!WARNING]
-> Be wary that if you are rate-limited that the file will be empty and the build will fail
+Use the `prefetch-nix` binary, which the package installs alongside the browser,
+to obtain the nix code you need.
 
-Use the provided binary `prefetch-nix-extension` to obtain the nix code you need.
+The Web Store decides which build of an extension to serve from the
+`prodversion`, `os` and `arch` in the request, so a hash is only valid for the
+exact URL it came from. `prefetch-nix` is wrapped by the home-manager module so
+it already asks for the same URL the module will later fetch. If you run the
+script straight out of the repo instead, override the defaults with
+`HELIUM_PRODVERSION`, `HELIUM_OS`, `HELIUM_ARCH`, `HELIUM_OS_ARCH` and
+`HELIUM_NACL_ARCH` to match your `programs.helium.prodversion` and target
+platform, or the hash will not match at build time.
+
+> [!NOTE]
+> If the store rate-limits you it answers with an error page rather than a CRX.
+> `prefetch-nix` checks for the CRX3 magic and reports `# FAILED` instead of
+> printing a hash for it, and the build refuses such a file too — so a
+> rate-limited fetch can never end up as a silently empty extension.
 
 You can copy the IDs from the URL in the chrome web store:
 
@@ -197,7 +240,7 @@ https://chromewebstore.google.com/detail/bitwarden-password-manage/nngceckbapebf
 Example Usage:
 
 ```console
-./prefetch-nix-extension.sh nngceckbapebfimnlniiiahkandclblb cjpalhdlnbpafiamejdnhcphjbkeiagm
+prefetch-nix nngceckbapebfimnlniiiahkandclblb cjpalhdlnbpafiamejdnhcphjbkeiagm
 
 # OUTPUT:
 extensions = [

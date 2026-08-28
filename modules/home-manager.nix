@@ -7,17 +7,43 @@
 }:
 let
   cfg = config.programs.helium;
+  webStorePlatform =
+    let
+      inherit (pkgs.stdenv.hostPlatform) isDarwin isAarch64;
+    in
+    {
+      os = if isDarwin then "mac" else "linux";
+      arch = if isAarch64 then "arm64" else "x64";
+      os_arch =
+        if !isAarch64 then
+          "x86_64"
+        else if isDarwin then
+          "arm64"
+        else
+          "aarch64";
+      nacl_arch = if isAarch64 then "arm" else "x86-64";
+    };
+
+  # Shared by fetchExtension and the prefetch-nix wrapper, so a hash obtained by
+  # hand is always a hash for the CRX the module will go on to download.
+  crxUrl =
+    id:
+    "https://clients2.google.com/service/update2/crx"
+    + "?response=redirect"
+    + "&os=${webStorePlatform.os}"
+    + "&arch=${webStorePlatform.arch}"
+    + "&os_arch=${webStorePlatform.os_arch}"
+    + "&nacl_arch=${webStorePlatform.nacl_arch}"
+    + "&prod=chromiumcrx&prodchannel=stable"
+    + "&prodversion=${cfg.prodversion}"
+    + "&acceptformat=crx3"
+    + "&x=id%3D${id}%26installsource%3Dondemand%26uc";
 
   fetchExtension =
     { id, hash }:
-    let
-      os = if pkgs.stdenv.isDarwin then "mac" else "linux";
-      arch = if pkgs.stdenv.isAarch64 then "arm64" else "x64";
-      os_arch = if pkgs.stdenv.isDarwin then "arm64" else "x86_64";
-    in
     pkgs.fetchurl {
       name = "${id}.crx";
-      url = "https://clients2.google.com/service/update2/crx?response=redirect&os=${os}&arch=${arch}&os_arch=${os_arch}&nacl_arch=x86-64&prod=chromiumcrx&prodchannel=stable&prodversion=${cfg.prodversion}&acceptformat=crx3&x=id%3D${id}%26installsource%3Dondemand%26uc";
+      url = crxUrl id;
       inherit hash;
     };
 
@@ -29,10 +55,6 @@ let
         src = fetchExtension { inherit id hash; };
       }
       ''
-        # The Web Store answers 204 No Content for extensions that need a newer
-        # browser than `prodversion` claims. fetchurl stores that empty body
-        # happily, so without this check the build succeeds and the extension is
-        # silently missing at runtime.
         if [ ! -s "$src" ]; then
           echo "error: the CRX for ${id} is empty." >&2
           echo "The Chrome Web Store returned no content, which usually means" >&2
@@ -41,11 +63,23 @@ let
           exit 1
         fi
 
+        if [ "$(head -c 4 "$src")" != "Cr24" ]; then
+          echo "error: the CRX for ${id} is not a CRX3 file." >&2
+          echo "The Chrome Web Store served something else — an error or rate" >&2
+          echo "limit page, most likely. Re-run the hash prefetch." >&2
+          exit 1
+        fi
+
         mkdir -p $out
-        unzip -q $src -d $out || true
+        unzip -q $src -d $out || [ "$?" -le 1 ]
 
         # Remove the system-reserved metadata folder that causes the load error
         rm -rf $out/_metadata
+
+        if [ ! -f "$out/manifest.json" ]; then
+          echo "error: the CRX for ${id} unpacked without a manifest.json." >&2
+          exit 1
+        fi
       '';
 
   unpackedMode = cfg.extensionInstallMode == "unpacked";
@@ -57,10 +91,6 @@ let
     }) cfg.extensions
   );
 
-  # Helium's update requests carry no prodversion, and the Web Store answers
-  # every one of them with <updatecheck status="noupdate"/> — force-installs
-  # then silently do nothing. Pinning it in the update URL survives into the
-  # request Chromium builds, since it only appends its own query parameters.
   webStoreUpdateUrl = "https://clients2.google.com/service/update2/crx?prodversion=${cfg.prodversion}";
 
   policyAttrs = {
@@ -82,6 +112,15 @@ let
     else
       [ ];
 
+  enabledFeatures = lib.unique (
+    (cfg.package.enabledFeatures or [ ])
+    ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+      "NativeNotifications"
+      "SystemNotifications"
+    ]
+    ++ cfg.extraFeatures
+  );
+
   heliumWithFlags = pkgs.symlinkJoin {
     name = "helium-configured";
     paths = [ cfg.package ];
@@ -91,15 +130,26 @@ let
         ${lib.concatMapStringsSep " \\\n        " (f: "--add-flags ${lib.escapeShellArg f}") (
           [
             "--disable-component-update"
-            "--allow-file-access-from-files"
           ]
+          ++ lib.optional cfg.allowFileAccessFromFiles "--allow-file-access-from-files"
           ++ loadExtensionFlag
-          ++ lib.optionals pkgs.stdenv.isLinux [
+          ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
             "--ozone-platform-hint=auto"
-            "--enable-features=WaylandWindowDecorations,NativeNotifications,SystemNotifications"
           ]
+          ++ lib.optional (
+            enabledFeatures != [ ]
+          ) "--enable-features=${lib.concatStringsSep "," enabledFeatures}"
           ++ cfg.extraFlags
         )}
+
+      if [ -e $out/bin/prefetch-nix ]; then
+        wrapProgram $out/bin/prefetch-nix \
+          --set-default HELIUM_PRODVERSION ${lib.escapeShellArg cfg.prodversion} \
+          --set-default HELIUM_OS ${lib.escapeShellArg webStorePlatform.os} \
+          --set-default HELIUM_ARCH ${lib.escapeShellArg webStorePlatform.arch} \
+          --set-default HELIUM_OS_ARCH ${lib.escapeShellArg webStorePlatform.os_arch} \
+          --set-default HELIUM_NACL_ARCH ${lib.escapeShellArg webStorePlatform.nacl_arch}
+      fi
     '';
   };
 
@@ -167,6 +217,34 @@ in
     extraFlags = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];
+      description = ''
+        Extra command line arguments added to the wrapper.
+
+        Do not pass `--enable-features` here: Chromium keeps a single value per
+        switch, so it would replace the feature list the wrapper builds instead
+        of adding to it. Use `extraFeatures` for that.
+      '';
+    };
+    extraFeatures = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      description = ''
+        Additional Chromium features, merged into the single `--enable-features`
+        switch alongside the ones the package and this module already enable.
+      '';
+      example = [ "VaapiVideoDecodeLinuxGL" ];
+    };
+    allowFileAccessFromFiles = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Pass `--allow-file-access-from-files`.
+
+        This drops the same-origin restriction for `file://` pages, so any local
+        HTML file you open — including one you just downloaded — can read other
+        files on disk and send them off. Only enable it if you specifically need
+        local pages to load local resources.
+      '';
     };
     extraPolicies = lib.mkOption {
       type = lib.types.attrsOf lib.types.anything;
@@ -190,6 +268,13 @@ in
         Chromium preferences to set in the Default profile.
         These are merged into ~/.config/net.imput.helium/Default/Preferences.
         Type: 'helium://prefs-internals/' to search for the json keys and values
+
+        The merge happens once, during activation. Chromium owns this file at
+        runtime and rewrites it from memory when it exits, so close the browser
+        before activating or your settings are written back over. Preferences
+        that Chromium protects with a MAC in Secure Preferences cannot be set
+        this way at all — it notices the outside edit and resets them. Use
+        `extraPolicies` for anything that has to stick.
       '';
       example = lib.literalExpression ''
         {
@@ -234,21 +319,26 @@ in
 
         heliumPreferences = lib.mkIf (cfg.preferences != { }) (
           lib.hm.dag.entryAfter [ "writeBoundary" ] ''
-          prefs_dir="$HOME/.config/net.imput.helium/Default"
-          prefs_file="$prefs_dir/Preferences"
-          nix_prefs='${builtins.toJSON cfg.preferences}'
+            prefs_file="$HOME/.config/net.imput.helium/Default/Preferences"
+            nix_prefs=${lib.escapeShellArg (builtins.toJSON cfg.preferences)}
+            merged_prefs="$(mktemp)"
 
-          run mkdir -p "$prefs_dir"
-
-          if [ -f "$prefs_file" ]; then
-            merged=$(${pkgs.jq}/bin/jq -s '.[0] * .[1]' "$prefs_file" - <<< "$nix_prefs")
-            if [ -n "$merged" ]; then
-              printf '%s\n' "$merged" > "$prefs_file"
+            if [ -f "$prefs_file" ]; then
+              if ${lib.getExe pkgs.jq} -s '.[0] * .[1]' "$prefs_file" - \
+                   <<< "$nix_prefs" > "$merged_prefs"; then
+                run ${lib.getExe' pkgs.coreutils "install"} -Dm600 \
+                  "$merged_prefs" "$prefs_file"
+              else
+                warnEcho "helium: $prefs_file is not valid JSON; leaving it alone."
+              fi
+            else
+              printf '%s\n' "$nix_prefs" > "$merged_prefs"
+              run ${lib.getExe' pkgs.coreutils "install"} -Dm600 \
+                "$merged_prefs" "$prefs_file"
             fi
-          else
-            printf '%s\n' "$nix_prefs" > "$prefs_file"
-          fi
-        ''
+
+            rm -f "$merged_prefs"
+          ''
         );
       };
     };

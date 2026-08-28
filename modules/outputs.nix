@@ -5,7 +5,8 @@
     let
       sources = import ./sources.nix;
 
-      version = if pkgs.stdenv.isDarwin then sources.versions.darwin else sources.versions.linux;
+      version =
+        if pkgs.stdenv.hostPlatform.isDarwin then sources.versions.darwin else sources.versions.linux;
 
       src = pkgs.fetchurl (
         (sources.srcs.${system} or (throw "Unsupported system: ${system}")) sources.versions
@@ -36,7 +37,7 @@
         default = helium;
         inherit helium;
       }
-      // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux { inherit helium-widevine; };
+      // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux { inherit helium-widevine; };
 
       apps = {
         default = app;
